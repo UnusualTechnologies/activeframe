@@ -32,6 +32,13 @@ const mp4box = require('mp4box');
         tag = 'hvc1';
     }
 
+    console.log(`[af] input:  ${inputFile}`);
+    console.log(`[af] output: ${outputFile}  (type=${type}, maxWidth=${maxWidth}, gop=${gop}, crf=${crf})`);
+    console.log('[af] Step 1/3: transcoding with ffmpeg (live progress below)...');
+
+    // stdio: 'inherit' streams ffmpeg's own frame=/time= progress to the console so the
+    // transcode never looks hung. (Trade-off: ffmpeg.stderr is no longer captured on failure,
+    // but the same output has already been shown live.)
     const ffmpeg = spawnSync(ffmpegPath, [
         '-i', inputFile,
         '-c:v', cv,
@@ -52,13 +59,15 @@ const mp4box = require('mp4box');
         '-an',
         '-y',
         tmpMp4
-    ]);
+    ], { stdio: 'inherit' });
 
     if (ffmpeg.status !== 0) {
-        console.error('Failed to generate video');
-        console.error(ffmpeg.stderr.toString());
+        console.error(`[af] ffmpeg failed (exit code ${ffmpeg.status}).`);
+        if (ffmpeg.stderr) console.error(ffmpeg.stderr.toString());
         process.exit(1);
     }
+
+    console.log('[af] Transcode complete. Step 2/3: demuxing samples...');
 
     const mp4Buffer = new Uint8Array(fs.readFileSync(tmpMp4)).buffer;
     mp4Buffer.fileStart = 0;
@@ -70,6 +79,9 @@ const mp4box = require('mp4box');
 
     mp4boxfile.onReady = function (info) {
         const videoTrack = info.videoTracks[0];
+
+        console.log(`[af] video: ${videoTrack.video.width}x${videoTrack.video.height}, ` +
+            `${videoTrack.nb_samples} frames, codec ${videoTrack.codec}`);
 
         const trak = mp4boxfile.getTrackById(videoTrack.id);
         const sampleEntry = trak.mdia.minf.stbl.stsd.entries[0];
@@ -87,15 +99,14 @@ const mp4box = require('mp4box');
         }
 
         let offset = 0;
-        let databuf = new Buffer.alloc(0);
+        let chunks = []; // collect sample buffers; concatenated once at the end (O(n), not O(n^2))
         let jsonbuf = [];
         let frameKey = 0;
 
         mp4boxfile.onSamples = function (id, user, samples) {
             for (const sample of samples) {
                 const chunkData = Buffer.from(sample.data.buffer || sample.data, sample.data.byteOffset || 0, sample.data.byteLength || sample.data.length);
-                databuf = Buffer.concat([databuf, chunkData]);
-                // fs.writeSync(binFd, chunkData);
+                chunks.push(chunkData);
 
                 jsonbuf.push({
                     o: offset,
@@ -107,6 +118,18 @@ const mp4box = require('mp4box');
 
                 offset += chunkData.length;
                 frameKey += 1;
+            }
+
+            // Live progress: rewrite one line as batches arrive so the demux never looks hung.
+            process.stdout.write(`\r[af] collected ${jsonbuf.length}/${videoTrack.nb_samples} frames`);
+
+            // mp4box delivers samples in batches, calling onSamples once per batch. Emit the
+            // manifest + footer + file exactly ONCE, after every sample has been collected.
+            // Emitting inside each batch (the original behaviour) embeds a stale manifest into
+            // the stream on every call, which corrupts the footer offset and every frame's byte
+            // offset for any video large enough to extract in more than one batch.
+            if (jsonbuf.length < videoTrack.nb_samples) {
+                return;
             }
 
             let manifest = {
@@ -121,13 +144,15 @@ const mp4box = require('mp4box');
                 description: descriptionBase64
             };
 
-            // add description to the end of the data buffer
-            databuf = Buffer.concat([databuf, Buffer.from(JSON.stringify(manifest))]);
+            // Append the manifest then the footer, and build the whole file in a single concat.
+            chunks.push(Buffer.from(JSON.stringify(manifest)));
 
             const footer = Buffer.alloc(4);
             footer.writeUInt32LE(offset, 0);
-            databuf = Buffer.concat([databuf, footer]);
+            chunks.push(footer);
 
+            const databuf = Buffer.concat(chunks);
+            console.log(`\n[af] Step 3/3: writing ${(databuf.length / 1048576).toFixed(1)} MB to ${outputFile}...`);
             fs.writeFileSync(outputFile, databuf);
 
             console.log('✅ Video generated successfully!');
