@@ -1,5 +1,9 @@
 const path = require('path');
-const ffmpegPath = require('ffmpeg-static');
+// Prefer an explicit ffmpeg binary via FFMPEG_PATH (the Laravel job passes the
+// system ffmpeg here); fall back to the bundled static build. The ffmpeg-static
+// 7.0.2 build segfaults while probing some MPEG-TS files that the system ffmpeg
+// handles without issue.
+const ffmpegPath = process.env.FFMPEG_PATH || require('ffmpeg-static');
 const { spawnSync } = require('child_process');
 const { tmpdir } = require('os');
 const fs = require('fs');
@@ -13,9 +17,10 @@ const mp4box = require('mp4box');
     const type = process.argv[5] || 'h264'; // h264, h265
     const gop = process.argv[6] || 5;
     const crf = process.argv[7] || 28;
+    const fps = process.argv[8]; // optional target output frame rate; omit/empty to keep the source rate
 
     if (!inputFile || !outputFile) {
-        console.error('Usage: node af.js <input file> <output file> <max width> <type> <gop> <crf>');
+        console.error('Usage: node af.js <input file> <output file> <max width> <type> <gop> <crf> <fps>');
         process.exit(1);
     }
 
@@ -33,13 +38,10 @@ const mp4box = require('mp4box');
     }
 
     console.log(`[af] input:  ${inputFile}`);
-    console.log(`[af] output: ${outputFile}  (type=${type}, maxWidth=${maxWidth}, gop=${gop}, crf=${crf})`);
+    console.log(`[af] output: ${outputFile}  (type=${type}, maxWidth=${maxWidth}, gop=${gop}, crf=${crf}, fps=${fps || 'source'})`);
     console.log('[af] Step 1/3: transcoding with ffmpeg (live progress below)...');
 
-    // stdio: 'inherit' streams ffmpeg's own frame=/time= progress to the console so the
-    // transcode never looks hung. (Trade-off: ffmpeg.stderr is no longer captured on failure,
-    // but the same output has already been shown live.)
-    const ffmpeg = spawnSync(ffmpegPath, [
+    const ffmpegArgs = [
         '-i', inputFile,
         '-c:v', cv,
         '-tag:v', tag,
@@ -58,8 +60,20 @@ const mp4box = require('mp4box');
         '-movflags', '+faststart',
         '-an',
         '-y',
-        tmpMp4
-    ], { stdio: 'inherit' });
+    ];
+
+    // Optional target frame rate. `-r` as an output option duplicates/drops frames to
+    // hit the requested rate; omitting it preserves the source rate.
+    if (fps) {
+        ffmpegArgs.push('-r', fps);
+    }
+
+    ffmpegArgs.push(tmpMp4);
+
+    // stdio: 'inherit' streams ffmpeg's own frame=/time= progress to the console so the
+    // transcode never looks hung. (Trade-off: ffmpeg.stderr is no longer captured on failure,
+    // but the same output has already been shown live.)
+    const ffmpeg = spawnSync(ffmpegPath, ffmpegArgs, { stdio: 'inherit' });
 
     if (ffmpeg.status !== 0) {
         console.error(`[af] ffmpeg failed (exit code ${ffmpeg.status}).`);
