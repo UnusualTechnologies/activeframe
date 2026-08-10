@@ -126,6 +126,7 @@ const encodeSeconds = Number(t1 - t0) / 1e9;
 
 if (ffmpeg.status !== 0) {
     console.error(`[af] ffmpeg failed (exit code ${ffmpeg.status}).`);
+    fs.rmSync(tmpMp4, { force: true }); // ffmpeg may have written a partial file before failing
     process.exit(1);
 }
 console.log(`[af] Transcode complete (${encodeSeconds.toFixed(2)}s). Step 2/3: demuxing samples...`);
