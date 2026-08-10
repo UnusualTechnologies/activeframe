@@ -150,7 +150,26 @@ if (ffmpeg.status !== 0) {
 }
 console.log(`[af] Transcode complete (${encodeSeconds.toFixed(2)}s). Step 2/3: demuxing samples...`);
 
-const mp4Buffer = new Uint8Array(fs.readFileSync(tmpMp4)).buffer;
+// fs.readFileSync caps at 2 GiB, well below what this format can represent, so read the file in
+// chunks into a single ArrayBuffer instead.
+function readWholeFile(file) {
+    const size = fs.statSync(file).size;
+    const buf = Buffer.allocUnsafe(size);
+    const fd = fs.openSync(file, 'r');
+    try {
+        const CHUNK = 1 << 30; // 1 GiB per read
+        let pos = 0;
+        while (pos < size) {
+            pos += fs.readSync(fd, buf, pos, Math.min(CHUNK, size - pos), pos);
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
+    return buf;
+}
+
+const srcBuf = readWholeFile(tmpMp4);
+const mp4Buffer = srcBuf.buffer.slice(srcBuf.byteOffset, srcBuf.byteOffset + srcBuf.byteLength);
 mp4Buffer.fileStart = 0;
 fs.unlinkSync(tmpMp4);
 
@@ -222,6 +241,16 @@ mp4boxfile.onReady = function (info) {
         };
 
         chunks.push(Buffer.from(JSON.stringify(manifest)));
+        // The footer is a 32-bit offset, so the sample region cannot exceed 4 GiB. Fail with the
+        // actual numbers rather than letting writeUInt32LE throw an opaque range error.
+        if (offset > 0xFFFFFFFF) {
+            console.error(
+                `\n[af] Sample data is ${(offset / 2 ** 30).toFixed(2)} GiB, over the 4 GiB the .af ` +
+                `footer can address (32-bit offset).\n` +
+                `     Reduce resolution, frame rate or quality, or split the input.`
+            );
+            process.exit(1);
+        }
         const footer = Buffer.alloc(4);
         footer.writeUInt32LE(offset, 0);
         chunks.push(footer);
