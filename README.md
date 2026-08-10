@@ -34,8 +34,10 @@ The file packs **raw encoded samples** (H.264 / H.265) plus a **JSON manifest**.
 ## Generating an `.af` file
 
 ```bash
-node af.js <input video> <output.af> [maxWidth] [h264|h265] [gop] [crf]
+node af.js --input <input video> --output <output.af> [--codec h264|h265] [--mode cpu|gpu] [--maxWidth N] [--gop N] [--crf N] [--cq N]
 ```
+
+Defaults to H.264 on the GPU (NVENC) path, with settings validated end-to-end through real playback testing (Baseline profile, GOP=1). Pass `--codec h265` for H.265/HEVC (libx265/hevc_nvenc) if your target player doesn't have H.264's specific constraints, or `--mode cpu` for environments without an NVIDIA GPU. Run `node af.js` with no arguments to see every available flag.
 
 ---
 
