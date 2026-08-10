@@ -31,7 +31,8 @@ const inputFile = args.input;
 const outputFile = args.output;
 const maxWidth = parseInt(args.maxWidth || '1920', 10);
 const gop = parseInt(args.gop || '1', 10); // 1 = all-intra, for maximum seek compatibility
-const mode = args.mode || 'gpu'; // gpu (nvenc) | cpu (software x264/x265)
+// copy = package an already-correctly-encoded input without re-encoding.
+const mode = args.mode || 'gpu'; // gpu (nvenc) | cpu (software x264/x265) | copy (no re-encode)
 const codec = args.codec || 'h264'; // h264 | h265
 if (codec !== 'h264' && codec !== 'h265') {
     console.error(`Unknown --codec ${codec} (use h264 or h265)`);
@@ -51,7 +52,7 @@ const hwaccel = args.hwaccel || 'none'; // cuda | none - GPU-resident decode via
 const forceAllKeyframes = boolFlag(args.forceAllKeyframes, true);
 
 if (!inputFile || !outputFile) {
-    console.error('Usage: node af.js --input <in> --output <out.af> [--codec h264|h265] [--mode cpu|gpu] [--gop N] [--crf N] [--cq N] [--preset P] [--tune fastdecode|none] [--profile P] [--coder cabac|cavlc] [--forceAllKeyframes true|false] [--hwaccel cuda|none] [--maxWidth N] [--fps N] [--ffmpeg /path/to/ffmpeg]');
+    console.error('Usage: node af.js --input <in> --output <out.af> [--codec h264|h265] [--mode cpu|gpu|copy] [--gop N] [--crf N] [--cq N] [--preset P] [--tune fastdecode|none] [--profile P] [--coder cabac|cavlc] [--forceAllKeyframes true|false] [--hwaccel cuda|none] [--maxWidth N] [--fps N] [--ffmpeg /path/to/ffmpeg]');
     process.exit(1);
 }
 
@@ -71,51 +72,69 @@ const filterChain = hwaccel === 'cuda'
     ? `scale_cuda=w='min(${maxWidth},iw)':h=-2`
     : `scale='min(${maxWidth},iw)':-2`;
 
-let codecArgs;
-if (mode === 'cpu') {
-    const lib = codec === 'h264' ? 'libx264' : 'libx265';
-    codecArgs = ['-c:v', lib, '-crf', String(crf), '-sc_threshold', '0', '-preset', preset];
-    if (tune) codecArgs.push('-tune', tune);
-    if (coder) codecArgs.push('-coder', coder);
-} else if (mode === 'gpu') {
-    const enc = codec === 'h264' ? 'h264_nvenc' : 'hevc_nvenc';
-    codecArgs = ['-c:v', enc, '-rc', 'vbr', '-cq', String(cq), '-preset', preset];
-    if (tune) codecArgs.push('-tune', tune);
-    if (coder) codecArgs.push('-coder', coder);
+let ffArgs;
+if (mode === 'copy') {
+    // Input is already encoded to the wanted spec, so every encode-side option (scale, profile,
+    // GOP, pix_fmt, keyframe forcing, frame rate) is either meaningless or rejected under -c:v copy.
+    ffArgs = [
+        '-i', inputFile,
+        '-c:v', 'copy',
+        '-tag:v', tag,
+        '-map_metadata', '-1',
+        '-movflags', '+faststart',
+        '-an',
+        '-y',
+        tmpMp4,
+    ];
 } else {
-    console.error(`Unknown --mode ${mode} (use cpu or gpu)`);
-    process.exit(1);
-}
+    let codecArgs;
+    if (mode === 'cpu') {
+        const lib = codec === 'h264' ? 'libx264' : 'libx265';
+        codecArgs = ['-c:v', lib, '-crf', String(crf), '-sc_threshold', '0', '-preset', preset];
+        if (tune) codecArgs.push('-tune', tune);
+        if (coder) codecArgs.push('-coder', coder);
+    } else if (mode === 'gpu') {
+        const enc = codec === 'h264' ? 'h264_nvenc' : 'hevc_nvenc';
+        codecArgs = ['-c:v', enc, '-rc', 'vbr', '-cq', String(cq), '-preset', preset];
+        if (tune) codecArgs.push('-tune', tune);
+        if (coder) codecArgs.push('-coder', coder);
+    } else {
+        console.error(`Unknown --mode ${mode} (use cpu, gpu or copy)`);
+        process.exit(1);
+    }
 
-const ffArgs = [
-    ...hwaccelArgs,
-    '-i', inputFile,
-    ...codecArgs,
-    '-tag:v', tag,
-    '-vf', filterChain,
-    '-map_metadata', '-1',
-    '-refs', '1',
-    '-level:v', '5.1',
-    '-profile:v', profile,
-    // -pix_fmt would force a software conversion filter, breaking the GPU-resident path.
-    ...(hwaccel === 'cuda' ? [] : ['-pix_fmt', 'yuv420p']),
-    '-g', String(effectiveGop),
-    '-bf', '0',
-    '-movflags', '+faststart',
-    '-an',
-    '-y',
-];
-if (forceAllKeyframes) {
-    ffArgs.push('-force_key_frames', 'expr:1');
-    // NVENC-only: without this, only the first forced keyframe is a real IDR.
-    if (mode === 'gpu') ffArgs.push('-forced-idr', '1');
+    ffArgs = [
+        ...hwaccelArgs,
+        '-i', inputFile,
+        ...codecArgs,
+        '-tag:v', tag,
+        '-vf', filterChain,
+        '-map_metadata', '-1',
+        '-refs', '1',
+        '-level:v', '5.1',
+        '-profile:v', profile,
+        // -pix_fmt would force a software conversion filter, breaking the GPU-resident path.
+        ...(hwaccel === 'cuda' ? [] : ['-pix_fmt', 'yuv420p']),
+        '-g', String(effectiveGop),
+        '-bf', '0',
+        '-movflags', '+faststart',
+        '-an',
+        '-y',
+    ];
+    if (forceAllKeyframes) {
+        ffArgs.push('-force_key_frames', 'expr:1');
+        // NVENC-only: without this, only the first forced keyframe is a real IDR.
+        if (mode === 'gpu') ffArgs.push('-forced-idr', '1');
+    }
+    if (fps) ffArgs.push('-r', String(fps));
+    ffArgs.push(tmpMp4);
 }
-if (fps) ffArgs.push('-r', String(fps));
-ffArgs.push(tmpMp4);
 
 console.log(`[af] input:  ${inputFile}`);
-console.log(`[af] output: ${outputFile}  (codec=${codec}, mode=${mode}, hwaccel=${hwaccel}, maxWidth=${maxWidth}, gop=${gop}, crf=${crf}, cq=${cq}, tune=${tune || 'none'}, profile=${profile}, fps=${fps || 'source'})`);
-console.log('[af] Step 1/3: transcoding with ffmpeg (live progress below)...');
+console.log(`[af] output: ${outputFile}  ` + (mode === 'copy'
+    ? `(codec=${codec}, mode=copy - no re-encode)`
+    : `(codec=${codec}, mode=${mode}, hwaccel=${hwaccel}, maxWidth=${maxWidth}, gop=${gop}, crf=${crf}, cq=${cq}, tune=${tune || 'none'}, profile=${profile}, fps=${fps || 'source'})`));
+console.log(`[af] Step 1/3: ${mode === 'copy' ? 'remuxing' : 'transcoding'} with ffmpeg (live progress below)...`);
 
 const t0 = process.hrtime.bigint();
 // stdio: 'inherit' streams ffmpeg's own progress live so the transcode never looks
