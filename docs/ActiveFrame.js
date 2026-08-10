@@ -61,11 +61,11 @@ window.ActiveFrame = class ActiveFrame {
         const res = await fetch(file);
         const fullBuffer = await res.arrayBuffer();
 
-        // Last 4 bytes = LE uint32 offset where JSON starts
-        const footer = new DataView(fullBuffer, fullBuffer.byteLength - 4);
-        const manifestOffset = footer.getUint32(0, true);
+        // Last 8 bytes = LE uint64 offset where JSON starts
+        const footer = new DataView(fullBuffer, fullBuffer.byteLength - 8);
+        const manifestOffset = Number(footer.getBigUint64(0, true));
 
-        const manifestBytes = new Uint8Array(fullBuffer, manifestOffset, fullBuffer.byteLength - 4 - manifestOffset);
+        const manifestBytes = new Uint8Array(fullBuffer, manifestOffset, fullBuffer.byteLength - 8 - manifestOffset);
         const manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
 
         return {

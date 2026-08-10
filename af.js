@@ -241,24 +241,49 @@ mp4boxfile.onReady = function (info) {
         };
 
         chunks.push(Buffer.from(JSON.stringify(manifest)));
-        // The footer is a 32-bit offset, so the sample region cannot exceed 4 GiB. Fail with the
-        // actual numbers rather than letting writeUInt32LE throw an opaque range error.
-        if (offset > 0xFFFFFFFF) {
-            console.error(
-                `\n[af] Sample data is ${(offset / 2 ** 30).toFixed(2)} GiB, over the 4 GiB the .af ` +
-                `footer can address (32-bit offset).\n` +
-                `     Reduce resolution, frame rate or quality, or split the input.`
-            );
+        // Footer: 8-byte LE offset of the manifest. A 32-bit footer capped the sample region at
+        // 4 GiB, which a long enough clip reaches (~6.6h at 960x540/15fps all-intra).
+        if (offset > Number.MAX_SAFE_INTEGER) {
+            console.error(`\n[af] Sample data ${offset} exceeds the largest exactly-representable offset.`);
             process.exit(1);
         }
-        const footer = Buffer.alloc(4);
-        footer.writeUInt32LE(offset, 0);
+        const footer = Buffer.alloc(8);
+        footer.writeBigUInt64LE(BigInt(offset), 0);
         chunks.push(footer);
 
-        const databuf = Buffer.concat(chunks);
-        console.log(`\n[af] Step 3/3: writing ${(databuf.length / 1048576).toFixed(1)} MB to ${outputFile}...`);
-        fs.writeFileSync(outputFile, databuf);
-        console.log(`OK frames=${frameKey} bytes=${databuf.length} encode_seconds=${encodeSeconds.toFixed(2)}`);
+        // Write incrementally rather than concatenating everything first: fs.writeFileSync caps a
+        // single write at 2 GiB, and the per-frame buffers are views into the source, so one big
+        // concat would duplicate the entire clip in memory. Batch into moderate blocks to keep the
+        // syscall count sane without holding much extra.
+        const totalBytes = chunks.reduce((s, c) => s + c.length, 0);
+        console.log(`\n[af] Step 3/3: writing ${(totalBytes / 1048576).toFixed(1)} MB to ${outputFile}...`);
+
+        const FLUSH_AT = 256 * 1024 * 1024;
+        const MAX_WRITE = 1 << 30;
+        const fd = fs.openSync(outputFile, 'w');
+        try {
+            let pending = [];
+            let pendingBytes = 0;
+            const flush = () => {
+                if (!pendingBytes) return;
+                const block = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingBytes);
+                let off = 0;
+                while (off < block.length) {
+                    off += fs.writeSync(fd, block, off, Math.min(MAX_WRITE, block.length - off));
+                }
+                pending = [];
+                pendingBytes = 0;
+            };
+            for (const c of chunks) {
+                pending.push(c);
+                pendingBytes += c.length;
+                if (pendingBytes >= FLUSH_AT) flush();
+            }
+            flush();
+        } finally {
+            fs.closeSync(fd);
+        }
+        console.log(`OK frames=${frameKey} bytes=${totalBytes} encode_seconds=${encodeSeconds.toFixed(2)}`);
     };
     mp4boxfile.setExtractionOptions(videoTrack.id);
     mp4boxfile.start();

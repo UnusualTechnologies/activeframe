@@ -41,6 +41,35 @@ Defaults to H.264 on the GPU (NVENC) path, with settings validated end-to-end th
 
 ---
 
+## File format
+
+An `.af` file is three parts, in order:
+
+```
+[ encoded samples ][ JSON manifest ][ 8-byte footer ]
+```
+
+- **Samples** — raw encoded frames (H.264 / H.265), concatenated with no container.
+- **Manifest** — JSON describing the clip (`codec`, `width`, `height`, `totalFrames`) and one entry
+  per frame giving its byte offset `o`, length `l`, timestamp `t` in microseconds, and type `ty`.
+- **Footer** — the byte offset at which the manifest begins, as a **little-endian unsigned 64-bit
+  integer**. Read the last 8 bytes to locate the manifest, then the manifest to locate any frame.
+
+### 64-bit footer — not backwards compatible
+
+The footer was previously a 4-byte offset, which capped the sample region at 4 GiB. That is a real
+limit rather than a theoretical one: roughly a 6.6-hour clip at 960x540 / 15fps all-intra reaches
+it, and anything past that point produced a file whose manifest could not be located.
+
+It is now 8 bytes, which removes the limit for any practical input.
+
+**This is a breaking change in both directions.** Files written with the old 4-byte footer cannot be
+read by this version, and files written by this version cannot be read by older readers. Existing
+`.af` files must be regenerated, and any separate reader implementation — including native players
+outside this repo — needs the same 4 → 8 byte change.
+
+---
+
 ## Roadmap / ideas
 
 - Surface **codec support** before loading (e.g. companion manifest or a tiny probe).
