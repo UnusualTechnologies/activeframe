@@ -221,6 +221,11 @@ mp4boxfile.onReady = function (info) {
             return;
         }
 
+        // Measured from the samples, not copied from --gop: the two diverge whenever something
+        // overrides the request, and --forceAllKeyframes (on by default) always does. Reporting
+        // the requested value produced demo assets labelled gop 5 that were in fact all-intra.
+        const keyframes = jsonbuf.reduce((n, f) => n + (f.ty === 'key' ? 1 : 0), 0);
+
         const manifest = {
             codec: videoTrack.codec,
             fps: videoTrack.nb_samples / (videoTrack.duration / videoTrack.timescale),
@@ -228,7 +233,9 @@ mp4boxfile.onReady = function (info) {
             frames: jsonbuf,
             width: videoTrack.video.width,
             height: videoTrack.video.height,
-            gop,
+            gop: keyframes ? videoTrack.nb_samples / keyframes : gop,
+            _requestedGop: gop,
+            _keyframes: keyframes,
             type: codec,
             description: descriptionBase64,
             _mode: mode,
